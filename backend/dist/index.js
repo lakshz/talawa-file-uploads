@@ -1,14 +1,12 @@
 import express from "express";
 import { ApolloServer, gql } from "apollo-server-express";
-import { finished } from "stream/promises";
 import graphqlUploadExpress from "graphql-upload/graphqlUploadExpress.mjs";
 import GraphQLUpload from "graphql-upload/GraphQLUpload.mjs";
 import { ApolloServerPluginLandingPageLocalDefault } from "apollo-server-core";
-import fs from "fs";
+import mongoose from "mongoose";
+import mongodb from "mongodb";
+const dbName = "talawa-file-uploads";
 const typeDefs = gql `
-  #graphql
-  # Comments in GraphQL strings (such as this one) start with the hash (#) symbol.
-
   type User {
     name: String
   }
@@ -35,7 +33,6 @@ const typeDefs = gql `
 
   type Mutation {
     singleUpload(file: Upload!): File!
-    createUser(data: CreateUserInput!): User!
   }
 `;
 const users = [
@@ -53,21 +50,28 @@ const resolvers = {
     },
     Mutation: {
         singleUpload: async (parent, { file }) => {
-            const { createReadStream, filename, mimetype, encoding } = await file;
-            const stream = createReadStream();
-            const out = fs.createWriteStream("local-file-output.txt");
-            stream.pipe(out);
-            await finished(out);
-            return { filename, mimetype, encoding };
-        },
-        createUser: async (parent, args) => {
-            const { createReadStream, filename, mimetype, encoding } = await args.data
-                .image;
-            const stream = createReadStream();
-            const out = require("fs").createWriteStream("local-file-output.txt");
-            stream.pipe(out);
-            await finished(out);
-            return { name: "Lakshya" };
+            try {
+                console.log("here");
+                const { createReadStream, filename, mimetype, encoding } = await file;
+                const stream = createReadStream();
+                const client = mongoose.connection.getClient();
+                const db = client.db(dbName);
+                const bucket = new mongodb.GridFSBucket(db);
+                const uploadStream = bucket.openUploadStream(filename);
+                console.log(uploadStream);
+                await new Promise((resolve, reject) => {
+                    stream
+                        .pipe(uploadStream)
+                        .on("error", reject)
+                        .on("finish", () => {
+                        resolve;
+                        return { filename, mimetype, encoding };
+                    });
+                });
+            }
+            catch (err) {
+                console.log(err);
+            }
         },
     },
 };
@@ -75,16 +79,23 @@ async function startServer() {
     const server = new ApolloServer({
         typeDefs,
         resolvers,
-        csrfPrevention: true, // needed for security
+        csrfPrevention: true,
         cache: "bounded",
         plugins: [ApolloServerPluginLandingPageLocalDefault({ embed: true })],
     });
     await server.start();
     const app = express();
-    // This middleware should be added before calling `applyMiddleware`.
     app.use(graphqlUploadExpress());
-    server.applyMiddleware({ app });
+    server.applyMiddleware({ app: app });
     await new Promise((r) => app.listen({ port: 4000 }, r));
     console.log(`🚀 Server ready at http://localhost:4000${server.graphqlPath}`);
 }
+const connectDB = async () => {
+    const MONGO_URL = `mongodb://localhost:27017/${dbName}`;
+    mongoose
+        .connect(MONGO_URL)
+        .then(() => console.log("MongoDB connected"))
+        .catch((err) => console.log("MongoDB connection error:", err));
+};
+connectDB();
 startServer();
